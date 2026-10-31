@@ -55,3 +55,40 @@ def test_custom_serde(input_data: dict[str, Any]) -> None:
         assert retrieved_checkpoint_tuple is not None
         assert retrieved_checkpoint_tuple.checkpoint == input_data["chkpnt_1"]
         assert retrieved_checkpoint_tuple.metadata == input_data["metadata_1"]
+
+
+def test_tc012_unserializable_value_raises_and_writes_nothing(
+    client: MongoClient, db_name: str
+) -> None:
+    """REQ-E-012: a serialization failure propagates and nothing is written."""
+    import pytest
+    from langgraph.checkpoint.base import empty_checkpoint
+
+    loop: dict[str, Any] = {"a": 1}
+    loop["self"] = loop
+    saver = MongoDBSaver(client, db_name)
+    for versions in ({"loop": 1}, {"loop": f"{1:032}.{0.5:016}"}):
+        ck = empty_checkpoint()
+        ck["channel_values"] = {"loop": loop}
+        ck["channel_versions"] = dict(versions)
+        with pytest.raises((TypeError, ValueError, RecursionError)):
+            saver.put(
+                {"configurable": {"thread_id": "t", "checkpoint_ns": ""}},
+                ck,
+                {},
+                dict(versions),
+            )
+    with pytest.raises((TypeError, ValueError, RecursionError)):
+        saver.put_writes(
+            {
+                "configurable": {
+                    "thread_id": "t",
+                    "checkpoint_ns": "",
+                    "checkpoint_id": "1",
+                }
+            },
+            [("ok", 1), ("loop", loop)],
+            "task",
+        )
+    for coll in ("checkpoints", "checkpoint_writes", "checkpoint_blobs"):
+        assert client[db_name][coll].count_documents({}) == 0
