@@ -141,8 +141,12 @@ def test_string_identifiers_reach_query(saver: MongoDBSaver) -> None:
     saver.put(_config(checkpoint_id=None), empty_checkpoint(), {}, {})
 
     saver.put_writes(_config(), [("ch", "v")], "task")
-    writes.bulk_write.assert_called_once()
+    writes.update_one.assert_called_once()
+    assert writes.update_one.call_args.args[0]["thread_id"] == "t"
 
+    # a mocked session's with_transaction never runs the callback
+    saver._supports_transactions = False
     saver.delete_thread("t")
-    checkpoints.delete_many.assert_called_once_with({"thread_id": "t"})
-    writes.delete_many.assert_called_once_with({"thread_id": "t"})
+    for coll in (checkpoints, writes):
+        coll.delete_many.assert_called_once()
+        assert coll.delete_many.call_args.args[0] == {"thread_id": "t"}

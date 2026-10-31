@@ -14,6 +14,9 @@ dependencies = [
     "pymongo>=4.18.2",
 ]
 
+[project.optional-dependencies]
+zstd = ["zstandard>=0.22"]
+
 [dependency-groups]
 dev = [
     "anyio>=4.4.0",
