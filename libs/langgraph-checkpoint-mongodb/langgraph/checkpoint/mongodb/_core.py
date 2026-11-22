@@ -5,14 +5,15 @@ here so that the sync ``MongoDBSaver`` and any future ``AsyncMongoDBSaver``
 share one implementation. Saver classes only perform I/O.
 
 This module MUST NOT import ``pymongo`` (enforced by a test). It uses the
-``bson`` codec (shipped alongside pymongo, but not the driver) only to measure
-exact document sizes.
+``bson`` codec (shipped alongside pymongo, but not the driver) to measure
+document sizes and normalize native scalar types.
 """
 
 from __future__ import annotations
 
 import hashlib
 import logging
+import math
 import random
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -341,6 +342,22 @@ def classify_channel(value: Any, inline_max_chars: int) -> Literal["inline", "bl
     return "blob"
 
 
+def is_native_scalar(value: Any, max_string_bytes: int) -> bool:
+    """Scalars that round trip through BSON without invoking the serializer."""
+    if value is None or type(value) is bool:
+        return True
+    if type(value) is int:
+        return abs(value) <= 2**53 - 1
+    if type(value) is float:
+        return math.isfinite(value)
+    if type(value) is str and len(value) <= max_string_bytes:
+        try:
+            return len(value.encode()) <= max_string_bytes
+        except UnicodeEncodeError:
+            return False
+    return False
+
+
 @dataclass
 class BlobWrite:
     """Insert-if-absent of one channel value into the blobs collection."""
@@ -375,11 +392,13 @@ def dumps_value(
 
 def loads_value(
     serde: SerializerProtocol,
-    type_: str,
-    data: bytes,
+    type_: str | None,
+    data: Any,
     max_decompressed_bytes: int = DEFAULT_MAX_DECOMPRESSED_BYTES,
 ) -> Any:
-    """Inverse of ``dumps_value``; understands ``+gzip`` / ``+zstd`` always."""
+    """Read a native scalar or a typed payload, including compressed payloads."""
+    if type_ is None:
+        return int(data) if isinstance(data, bson.Int64) else data
     base, codec = _compression.split_type(type_)
     if codec is not None:
         data = _compression.decompress(codec, data, max_decompressed_bytes)
@@ -400,6 +419,7 @@ def plan_put(
     size_policy: SizePolicy = SizePolicy(),
     created_at: datetime | None = None,
     compression: CompressionConfig | None = None,
+    native_scalars: bool = False,
 ) -> PutPlan:
     """Build (and size-check) every document ``put`` will write.
 
@@ -437,15 +457,25 @@ def plan_put(
 
     inline: dict[str, Any] = {}
     refs: list[dict[str, Any]] = []
+    native_channels: set[str] = set()
     if not isinstance(values, Mapping):
         # Not a channel mapping (malformed but historically accepted): keep the
         # checkpoint as-is in the manifest.
         values = {}
     for ch, value in values.items():
-        if ch not in versions or classify_channel(value, inline_max_chars) == "inline":
+        native = native_scalars and is_native_scalar(
+            value, min(inline_max_chars, DEFAULT_INLINE_MAX_CHARS)
+        )
+        if (
+            ch not in versions
+            or versions[ch] is None
+            or (not native and classify_channel(value, inline_max_chars) == "inline")
+        ):
             inline[ch] = value
         else:
             refs.append({"channel": ch, "version": versions[ch]})
+            if native:
+                native_channels.add(ch)
 
     blob_writes: list[BlobWrite] = []
     touches: list[dict[str, Any]] = []
@@ -456,16 +486,19 @@ def plan_put(
             "channel": ref["channel"],
             "version": ref["version"],
         }
-        if new_versions is not None and ref["channel"] not in new_versions:
+        ch = ref["channel"]
+        native = ch in native_channels
+        # Old manifests stored short scalars inline. An unchanged version may
+        # need its first document here, so include it in the insert-only upsert.
+        if not native and new_versions is not None and ch not in new_versions:
             touches.append(key)
             continue
-        type_, data = dumps_value(serde, values[ref["channel"]], compression)
-        body: dict[str, Any] = {"type": type_, "value": data}
+        body = stored_value(serde, values[ch], compression, native=native)
         info = check_document_size(
             names.blobs,
             {**key, **body, **({"created_at": created_at} if created_at else {})},
             size_policy,
-            lambda c=ref["channel"], n=len(data): [(c, n)],  # type: ignore[misc]
+            lambda c=ch, b=body: [(c, stored_value_size(b))],  # type: ignore[misc]
         )
         blob_writes.append(BlobWrite(key, body, info))
 
@@ -494,6 +527,28 @@ def plan_put(
     )
     infos = [b.info for b in blob_writes] + [manifest_info]
     return PutPlan(2, manifest_filter, manifest, blob_writes, touches, infos)
+
+
+def stored_value(
+    serde: SerializerProtocol,
+    value: Any,
+    compression: CompressionConfig | None,
+    *,
+    native: bool,
+) -> dict[str, Any]:
+    if native:
+        return {"type": None, "value": value}
+    type_, data = dumps_value(serde, value, compression)
+    return {"type": type_, "value": data}
+
+
+def stored_value_size(doc: dict[str, Any]) -> int:
+    value = doc["value"]
+    return (
+        measure({"value": value}) - measure({"value": None})
+        if doc["type"] is None
+        else len(value)
+    )
 
 
 def blobs_query(
@@ -629,6 +684,8 @@ def plan_put_writes(
     size_policy: SizePolicy = SizePolicy(),
     created_at: datetime | None = None,
     compression: CompressionConfig | None = None,
+    native_scalars: bool = False,
+    inline_max_chars: int = DEFAULT_INLINE_MAX_CHARS,
 ) -> list[WriteOp]:
     """Upserts for ``put_writes``; size-checked before anything is written.
 
@@ -647,12 +704,18 @@ def plan_put_writes(
             "task_id": task_id,
             "idx": special_idx.get(channel, idx),
         }
-        type_, data = dumps_value(serde, value, compression)
         body: dict[str, Any] = {
             "task_path": task_path,
             "channel": channel,
-            "type": type_,
-            "value": data,
+            **stored_value(
+                serde,
+                value,
+                compression,
+                native=native_scalars
+                and is_native_scalar(
+                    value, min(inline_max_chars, DEFAULT_INLINE_MAX_CHARS)
+                ),
+            ),
         }
         if created_at is not None:
             body["created_at"] = created_at
@@ -660,7 +723,7 @@ def plan_put_writes(
             names.writes,
             {**key, **body},
             size_policy,
-            lambda c=channel, n=len(data): [(c, n)],  # type: ignore[misc]
+            lambda c=channel, b=body: [(c, stored_value_size(b))],  # type: ignore[misc]
         )
         ops.append(WriteOp(key, {set_method: body}, info))
     return ops

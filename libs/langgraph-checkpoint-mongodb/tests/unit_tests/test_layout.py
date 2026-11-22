@@ -7,6 +7,7 @@ import bson
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage
 from langgraph.checkpoint.base import Checkpoint, create_checkpoint, empty_checkpoint
+from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
 from pymongo import MongoClient
 
 from langgraph.checkpoint.mongodb import CheckpointIntegrityError, MongoDBSaver, _core
@@ -57,8 +58,8 @@ def test_tc030_manifest_and_blobs(
     m = client[db_name]["checkpoints"].find_one({"checkpoint_id": ck["id"]})
     assert m is not None
     assert m["layout"] == 2
-    assert {r["channel"] for r in m["blob_refs"]} == {"messages", "doc"}
-    assert set(m["inline_channels"]) == {"count", "flag", "label", "nothing"}
+    assert {r["channel"] for r in m["blob_refs"]} == set(values)
+    assert m["inline_channels"] == []
     for r in m["blob_refs"]:
         assert r["version"] == ck["channel_versions"][r["channel"]]
     blobs = list(client[db_name]["checkpoint_blobs"].find({}, {"_id": 0}))
@@ -74,6 +75,78 @@ def test_tc030_manifest_and_blobs(
     assert tup is not None
     assert tup.checkpoint["channel_values"] == values
     assert tup.checkpoint == ck
+
+
+def test_queryable_scalar_versions_and_pending_writes(
+    client: MongoClient, db_name: str, make_saver: Callable[..., MongoDBSaver]
+) -> None:
+    saver = make_saver()
+    prompt = "A constant prompt"
+    saved, first = _step(
+        saver, _cfg(), None, {"system.prompt": prompt}, ["system.prompt"]
+    )
+    saved, second = _step(
+        saver, saved, first, {"system.prompt": prompt, "count": 2}, ["count"]
+    )
+    saver.put_writes(saved, [("approval", None), ("structured", {"x": 1})], "task")
+
+    db = client[db_name]
+    query = {"channel": "system.prompt", "type": {"$type": "null"}, "value": prompt}
+    assert db.checkpoint_blobs.count_documents(query) == 1
+    assert (
+        db.checkpoints.count_documents(
+            {
+                "blob_refs": {
+                    "$elemMatch": {
+                        "channel": "system.prompt",
+                        "version": first["channel_versions"]["system.prompt"],
+                    }
+                }
+            }
+        )
+        == 2
+    )
+    assert (
+        db.checkpoint_writes.count_documents(
+            {
+                "channel": "approval",
+                "type": {"$type": "null"},
+                "value": {"$type": "null"},
+            }
+        )
+        == 1
+    )
+    reader = make_saver()
+    result = reader.get_tuple(saved)
+    assert result is not None
+    assert result.checkpoint == second
+    assert result.pending_writes == [
+        ("task", "approval", None),
+        ("task", "structured", {"x": 1}),
+    ]
+    assert [row.checkpoint for row in reader.list(_cfg())] == [second, first]
+
+
+def test_older_inline_scalar_gets_a_document_on_resume(
+    client: MongoClient, db_name: str, make_saver: Callable[..., MongoDBSaver]
+) -> None:
+    legacy = make_saver(serde=JsonPlusSerializer())
+    values = {"prompt": "old layout 2", "count": 2**42}
+    config, first = _step(legacy, _cfg(), None, values, list(values))
+    legacy.put_writes(config, [("approval", True)], "task")
+    db = client[db_name]
+    assert db.checkpoint_blobs.count_documents({}) == 0
+    assert db.checkpoint_writes.find_one()["type"] == "msgpack"
+
+    saver = make_saver()
+    existing = saver.get_tuple(config)
+    assert existing is not None and existing.checkpoint == first
+    assert existing.pending_writes == [("task", "approval", True)]
+    resumed, second = _step(saver, config, first, values, [])
+    restored = saver.get_tuple(resumed)
+    assert restored is not None and restored.checkpoint == second
+    assert type(restored.checkpoint["channel_values"]["count"]) is int
+    assert db.checkpoint_blobs.count_documents({"type": {"$type": "null"}}) == 2
 
 
 class _FailingUpdates:
@@ -155,7 +228,9 @@ def test_unchanged_channels_are_referenced_not_rewritten(
     cfg1, ck1 = _step(saver, _cfg(), None, values, ["a", "b", "small"])
     values2 = {**values, "a": [1, 1], "small": 2}
     cfg2, ck2 = _step(saver, cfg1, ck1, values2, ["a", "small"])
-    assert client[db_name]["checkpoint_blobs"].count_documents({}) == 3
+    blobs = client[db_name]["checkpoint_blobs"]
+    assert blobs.count_documents({"channel": {"$in": ["a", "b"]}}) == 3
+    assert blobs.count_documents({"channel": "small", "type": {"$type": "null"}}) == 2
     t1, t2 = saver.get_tuple(cfg1), saver.get_tuple(cfg2)
     assert t1 and t1.checkpoint["channel_values"] == values
     assert t2 and t2.checkpoint["channel_values"] == values2

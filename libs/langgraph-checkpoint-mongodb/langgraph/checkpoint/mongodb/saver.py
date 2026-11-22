@@ -135,9 +135,9 @@ class MongoDBSaver(BaseCheckpointSaver):
             ``max_document_bytes`` (default 0.8).
         on_document_size (Optional[Callable[[DocumentSizeInfo], Any]]): Called
             once per written document with its collection and BSON size.
-        inline_max_chars (int): Strings up to this length (and None, booleans,
-            numbers) stay inline in the checkpoint manifest; other values are
-            stored as blobs (default 1024). Do not lower it for existing threads.
+        inline_max_chars (int): Legacy inline string threshold (default 1024).
+            Also bounds the UTF-8 bytes of native BSON strings, up to 1024.
+            Keep it consistent across writers for existing threads.
         compression (Optional[CompressionConfig]): Compress blob and
             pending-write values of at least ``min_bytes`` (gzip, or zstd with
             the ``[zstd]`` extra). Compressed values are always readable.
@@ -236,6 +236,7 @@ class MongoDBSaver(BaseCheckpointSaver):
             size_warning_ratio=size_warning_ratio,
             on_document_size=on_document_size,
         )
+        self._native_scalars = serde is None
         if serde is not None:
             self.serde = serde
         else:
@@ -820,6 +821,7 @@ class MongoDBSaver(BaseCheckpointSaver):
             size_policy=self.size_policy,
             created_at=now if self.ttl else None,
             compression=self.compression,
+            native_scalars=self._native_scalars,
         )
         self._write(
             thread_id,
@@ -1005,6 +1007,8 @@ class MongoDBSaver(BaseCheckpointSaver):
             size_policy=self.size_policy,
             created_at=now if self.ttl else None,
             compression=self.compression,
+            native_scalars=self._native_scalars,
+            inline_max_chars=self.inline_max_chars,
         )
         self._write(
             thread_id,

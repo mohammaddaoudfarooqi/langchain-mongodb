@@ -97,7 +97,7 @@ def test_tc061_sweep_deletes_expired_thread_and_keeps_tombstone(
     _age(client, db_name, "old", 48)
     result = saver.sweep_expired(older_than=timedelta(hours=24))
     assert result["threads"] == 1
-    assert result["documents"] == 2 + 1 + 2  # manifests + writes + blobs
+    assert result["documents"] == 2 + 1 + 4  # manifests + writes + blobs
     for coll in ("checkpoints", "checkpoint_writes", "checkpoint_blobs"):
         assert client[db_name][coll].count_documents({"thread_id": "old"}) == 0
         assert client[db_name][coll].count_documents({"thread_id": "fresh"}) > 0
@@ -241,7 +241,7 @@ def test_tc063_interrupted_sweep_is_finished_by_rerun(
     )
     monkeypatch.undo()
     result = saver.sweep_expired(older_than=timedelta(hours=1))
-    assert result == {"threads": 2, "documents": 2 * (1 + 1)}  # manifest + 1 blob each
+    assert result == {"threads": 2, "documents": 2 * (1 + 2)}  # manifest + 2 blobs each
     for coll in ("checkpoints", "checkpoint_blobs"):
         assert client[db_name][coll].count_documents({}) == 0
 

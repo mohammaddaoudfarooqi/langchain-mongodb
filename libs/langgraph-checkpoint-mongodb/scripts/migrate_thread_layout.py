@@ -109,6 +109,7 @@ def _plan(
         new_versions=None,
         names=saver._names,
         inline_max_chars=saver.inline_max_chars,
+        native_scalars=saver._native_scalars,
         size_policy=saver.size_policy,
         created_at=doc.get("created_at"),
     )

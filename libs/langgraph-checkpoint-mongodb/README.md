@@ -58,6 +58,21 @@ with MongoDBSaver.from_conn_string(MONGODB_URI, DB_NAME) as checkpointer:
     list(checkpointer.list(read_config))
 ```
 
+### Query scalar checkpoint values
+
+In the per-channel layout, the default serializer stores versioned scalar values such as booleans, `None`, finite numbers, and short UTF-8 strings directly in `checkpoint_blobs.value`. The `type` field is BSON null for native values. Checkpoints share a channel document while its version stays unchanged. Pending writes can also store native scalars in `checkpoint_writes.value`.
+
+```javascript
+db.checkpoint_blobs.find(
+  { thread_id: "my-thread", checkpoint_ns: "", channel: "system_prompt", type: { $type: "null" }, value: "You are a helpful assistant." },
+  { _id: 0, version: 1 }
+)
+```
+
+This query can return historical versions. To check current state, match the returned channel and version against the latest checkpoint's `blob_refs`. The example uses the default collection names. Strings use a UTF-8 byte budget of at most 1024, which a smaller `inline_max_chars` setting lowers. Custom serializers continue to encode values themselves.
+
+Existing checkpoints and serialized pending writes remain readable. The new format does not rewrite historical records. Numeric-only legacy threads must be migrated to use per-channel checkpoint storage. Upgrade all readers before writing native scalars to a shared database. Older savers cannot decode the new scalar records. MongoDB's per-document BSON size limit still applies.
+
 ### Async
 
 ```python

@@ -48,6 +48,24 @@ def test_tc005_measure_matches_bson_encode() -> None:
         assert _core.measure(doc) == len(bson.encode(doc))
 
 
+def test_native_scalars_are_bson_safe() -> None:
+    class CustomInt(int):
+        pass
+
+    for value in (None, False, 2**53 - 1, -0.0, "", "é" * 2, "😀"):
+        assert _core.is_native_scalar(value, 4)
+    for value in (
+        CustomInt(3),
+        2**53,
+        float("inf"),
+        float("nan"),
+        "é" * 3,
+        "\ud800",
+        {},
+    ):
+        assert not _core.is_native_scalar(value, 4)
+
+
 # ---------------------------------------------------------------- 5a versions
 
 VERSION_RE = r"^\d{32}\.[0-9.]{16}$"

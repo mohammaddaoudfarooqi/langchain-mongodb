@@ -53,7 +53,8 @@ def test_tc050_large_blob_compressed_small_blob_not(
     # pending writes are compressed too
     saver.put_writes(cfg, [("big", _text(MB)), ("small", "s")], "task")
     w = {d["channel"]: d for d in client[db_name]["checkpoint_writes"].find()}
-    assert w["big"]["type"] == "msgpack+gzip" and w["small"]["type"] == "msgpack"
+    assert w["big"]["type"] == "msgpack+gzip"
+    assert w["small"]["type"] is None and w["small"]["value"] == "s"
     tup = make_saver().get_tuple(cfg)
     assert tup is not None and tup.pending_writes == [
         ("task", "big", _text(MB)),

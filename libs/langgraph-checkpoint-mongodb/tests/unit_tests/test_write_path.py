@@ -38,7 +38,7 @@ def test_tc041a_pre_8_uses_collection_bulk_then_update(
     events = [e for e in recorder.events if e.command_name in WRITE_COMMANDS]
     assert [e.command_name for e in events] == ["update", "update"]
     assert events[0].command["update"] == "checkpoint_blobs"
-    assert len(events[0].command["updates"]) == 2
+    assert len(events[0].command["updates"]) == 3
     assert events[0].command.get("ordered", True) is True
     assert events[1].command["update"] == "checkpoints"
     recorder.clear()
@@ -66,7 +66,7 @@ def test_tc041b_8_0_uses_one_client_bulk_write(
         f"{db_name}.checkpoint_blobs",
         f"{db_name}.checkpoints",
     ]
-    assert len(cmd["ops"]) == 3
+    assert len(cmd["ops"]) == 4
     tup = MongoDBSaver(monitored_client, db_name).get_tuple(saved)
     assert tup is not None and tup.checkpoint == ck
 

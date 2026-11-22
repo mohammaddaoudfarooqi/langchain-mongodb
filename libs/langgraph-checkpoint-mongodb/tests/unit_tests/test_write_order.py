@@ -80,4 +80,4 @@ def test_put_writes_conflict_key_matches_unique_index(
     saver.put_writes(cfg, [("__error__", "boom2")], "task", "~q")
     err = client[db_name]["checkpoint_writes"].find_one({"channel": "__error__"})
     assert err is not None and err["task_path"] == "~q"
-    assert saver.serde.loads_typed((err["type"], err["value"])) == "boom2"
+    assert err["type"] is None and err["value"] == "boom2"
